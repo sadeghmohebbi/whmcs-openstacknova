@@ -5,6 +5,12 @@ if (!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
+use WHMCS\Database\Capsule;
+
+if (!class_exists('\OpenStack\OpenStack')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
 // Define module metadata
 function openstacknova_MetaData()
 {
@@ -36,18 +42,6 @@ function openstacknova_ConfigOptions($params)
             'Size' => '30',
             'Default' => '',
             'Description' => 'OpenStack password',
-        ),
-        'Project ID' => array(
-            'Type' => 'text',
-            'Size' => '50',
-            'Default' => '',
-            'Description' => 'Project ID (or Project Name)',
-        ),
-        'Region' => array(
-            'Type' => 'text',
-            'Size' => '20',
-            'Default' => 'RegionOne',
-            'Description' => 'OpenStack region',
         ),
         'Image ID' => array(
             'Type' => 'text',
@@ -176,18 +170,14 @@ function openstacknova_ClientArea($params)
     $templatePath = dirname(__FILE__) . '/templates/' . $templateFile;
     
     if (file_exists($templatePath)) {
-        $smarty = new Smarty();
-        $smarty->assign([
-            'server_info' => $server_info,
-            'openstack_error' => $openstack_error,
-            'serviceid' => $params['serviceid'],
-        ]);
-        
+        // WHMCS automatically handles template assignment
+        // Just return the array with template info
         return [
             'tabOverviewReplacementTemplate' => $templateFile,
             'templateVariables' => [
                 'server_info' => $server_info,
                 'openstack_error' => $openstack_error,
+                'serviceid' => $params['serviceid'],
             ],
         ];
     }
@@ -198,6 +188,9 @@ function openstacknova_ClientArea($params)
 function openstacknova_TestConnection($params)
 {
     try {
+        $params['configoption1'] = 'http://' . $params['serverhostname'] . ':' . $params['serverport'] . '/v3';
+        $params['configoption2'] = $params['serverusername'];
+        $params['configoption3'] = $params['serverpassword'];
         $client = openstacknova_createClient($params);
         $compute = $client->computeV2();
         // List servers to verify access
@@ -210,31 +203,57 @@ function openstacknova_TestConnection($params)
 
 function openstacknova_CreateAccount($params)
 {
+    logModuleCall(
+        'openstacknova',
+        __FUNCTION__,
+        $params,
+        '',
+        '',
+        array()
+    );
     try {
         $client = openstacknova_createClient($params);
         $compute = $client->computeV2();
 
+        $imageId = $params['configoption4']; // Image ID from config
+        $flavorId = $params['configoption5']; // Flavor ID from config
+        $networkId = $params['configoption6']; // Network ID from config
+
         // Build server creation array
         $serverOptions = [
-            'name' => $params['clientsdetails']['firstname'] . ' ' . $params['clientsdetails']['lastname'] . ' - ' . $params['serviceid'],
-            'imageId' => $params['configoption6'], // Image ID from config
-            'flavorId' => $params['configoption7'], // Flavor ID from config
+            'name' => $params['clientsdetails']['firstname'] . '_' . $params['clientsdetails']['lastname'] . '-' . $params['userid'] . '_' . $params['serviceid'],
+            'imageId' => $imageId, // Image ID from config
+            'flavorId' => $flavorId, // Flavor ID from config
         ];
         // Add network if configured
-        if (!empty($params['configoption8'])) {
-            $serverOptions['networks'] = [['uuid' => $params['configoption8']]];
+        if (!empty($networkId)) {
+            $serverOptions['networks'] = [['uuid' => $networkId]];
         }
 
         $server = $compute->createServer($serverOptions);
 
-        // Wait for the server to become ACTIVE (optional)
-        $server->waitFor('ACTIVE', 600);
+        logModuleCall(
+            'openstacknova',
+            __FUNCTION__ . ' - Server Created',
+            $server,
+            '',
+            '',
+            array()
+        );
 
         // Store the OpenStack server ID in the WHMCS service custom field
         openstacknova_saveServerId($params['serviceid'], $server->id);
 
         return 'success';
     } catch (Exception $e) {
+        logModuleCall(
+            'openstacknova',
+            __FUNCTION__,
+            $params,
+            '',
+            $e->getMessage(),
+            array()
+        );
         return 'Error creating instance: ' . $e->getMessage();
     }
 }
@@ -287,45 +306,129 @@ function openstacknova_TerminateAccount($params)
 // Create OpenStack client using parameters from WHMCS
 function openstacknova_createClient($params)
 {
-    require_once __DIR__ . '/vendor/autoload.php';
+    logModuleCall(
+        'openstacknova',
+        __FUNCTION__,
+        $params,
+        '',
+        '',
+        array()
+    );
 
     $authUrl = $params['configoption1']; // Auth URL
     $username = $params['configoption2']; // Username
     $password = $params['configoption3']; // Password
-    $projectId = $params['configoption4']; // Project ID
-    $region = $params['configoption5'];   // Region
 
     return new \OpenStack\OpenStack([
         'authUrl' => $authUrl,
-        'region'  => $region,
+        'region'  => 'RegionOne',
         'user'    => [
             'name'     => $username,
             'password' => $password,
-            'domain'   => ['id' => 'default'],
+            'domain'   => ['name' => 'Default'],
         ],
-        'scope'   => ['project' => ['id' => $projectId]],
+        'scope' => [
+            'project' => [
+                'name'   => 'admin',
+                'domain' => ['name' => 'Default'],
+            ],
+        ],
     ]);
 }
 
 // Store OpenStack server ID in a custom field
 function openstacknova_saveServerId($serviceId, $serverId)
 {
-    $fieldId = 1; // Replace with your actual custom field ID
-    update_query('tblcustomfieldsvalues', ['value' => $serverId], "fieldid = $fieldId AND relid = $serviceId");
+    // Get custom field ID for OpenStack Server ID
+    // First, let's find or create the custom field
+    $fieldId = openstacknova_getOrCreateCustomFieldId();
+    
+    // Check if a value already exists for this service
+    $existing = Capsule::table('tblcustomfieldsvalues')
+        ->where('fieldid', $fieldId)
+        ->where('relid', $serviceId)
+        ->first();
+    
+    if ($existing) {
+        // Update existing value
+        Capsule::table('tblcustomfieldsvalues')
+            ->where('id', $existing->id)
+            ->update(['value' => $serverId]);
+    } else {
+        // Insert new value
+        Capsule::table('tblcustomfieldsvalues')
+            ->insert([
+                'fieldid' => $fieldId,
+                'relid' => $serviceId,
+                'value' => $serverId
+            ]);
+    }
 }
 
 // Retrieve stored OpenStack server ID
 function openstacknova_getServerId($serviceId)
 {
-    $fieldId = 1; // Replace with your actual custom field ID
-    $result = select_query('tblcustomfieldsvalues', 'value', "fieldid = $fieldId AND relid = $serviceId");
-    $data = mysql_fetch_array($result);
-    return $data['value'] ?? null;
+    $fieldId = openstacknova_getOrCreateCustomFieldId();
+    
+    $result = Capsule::table('tblcustomfieldsvalues')
+        ->where('fieldid', $fieldId)
+        ->where('relid', $serviceId)
+        ->first();
+    
+    return $result ? $result->value : null;
 }
 
 // Delete stored server ID
 function openstacknova_deleteServerId($serviceId)
 {
-    $fieldId = 1;
-    delete_query('tblcustomfieldsvalues', "fieldid = $fieldId AND relid = $serviceId");
+    $fieldId = openstacknova_getOrCreateCustomFieldId();
+    
+    Capsule::table('tblcustomfieldsvalues')
+        ->where('fieldid', $fieldId)
+        ->where('relid', $serviceId)
+        ->delete();
+}
+
+// Get or create custom field for storing OpenStack server ID
+function openstacknova_getOrCreateCustomFieldId()
+{
+    static $fieldId = null;
+    
+    if ($fieldId !== null) {
+        return $fieldId;
+    }
+    
+    // Check if the field already exists
+    $field = Capsule::table('tblcustomfields')
+        ->where('fieldname', 'OpenStack Server ID')
+        ->where('type', 'product')
+        ->first();
+    
+    if ($field) {
+        $fieldId = $field->id;
+        return $fieldId;
+    }
+    
+    // Get the product ID for our module
+    // This requires knowing which product uses our module
+    // For simplicity, we'll create a generic field
+    // In production, you might want to create fields per product
+    
+    // Create the custom field
+    $fieldId = Capsule::table('tblcustomfields')->insertGetId([
+        'type' => 'product',
+        'relid' => 0, // 0 means available for all products
+        'fieldname' => 'OpenStack Server ID',
+        'fieldtype' => 'text',
+        'description' => 'Stores the OpenStack instance ID',
+        'fieldoptions' => '',
+        'regexpr' => '',
+        'adminonly' => 'on', // Only visible in admin area
+        'required' => '',
+        'showorder' => '',
+        'showinvoice' => '',
+        'sortorder' => 999,
+    ]);
+    
+    return $fieldId;
 }
