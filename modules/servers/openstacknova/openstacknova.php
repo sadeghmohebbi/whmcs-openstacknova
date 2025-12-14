@@ -188,13 +188,18 @@ function openstacknova_ClientArea($params)
 function openstacknova_TestConnection($params)
 {
     try {
+        if ($params['serverhostname']) {
+            $params['serverport'] = $params['serverport'] ?: 5000;
+        } else {
+            throw new Exception('Server Hostname is required for connection test.');
+        }
         $params['configoption1'] = 'http://' . $params['serverhostname'] . ':' . $params['serverport'] . '/v3';
         $params['configoption2'] = $params['serverusername'];
         $params['configoption3'] = $params['serverpassword'];
         $client = openstacknova_createClient($params);
         $compute = $client->computeV2();
         // List servers to verify access
-        $servers = $compute->listServers();
+        $az = $compute->listAvailabilityZones();
         return array('success' => true, 'error' => '');
     } catch (Exception $e) {
         return array('success' => false, 'error' => 'Connection failed: ' . $e->getMessage());
