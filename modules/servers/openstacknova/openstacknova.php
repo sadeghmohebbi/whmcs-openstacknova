@@ -1,10 +1,12 @@
 <?php
 // modules/servers/openstacknova/openstacknova.php
 
+
 if (!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
+use WHMCS\Module\Server\Openstacknova\OpenStackMetricsProvider;
 use WHMCS\Database\Capsule;
 
 if (!class_exists('\OpenStack\OpenStack')) {
@@ -19,6 +21,10 @@ function openstacknova_MetaData()
         'APIVersion' => '1.1',
         'RequiresServer' => true,
     );
+}
+
+function openstacknova_MetricProvider($params) {
+    return new OpenStackMetricsProvider($params);
 }
 
 // Configuration options for the product module
@@ -67,36 +73,40 @@ function openstacknova_ConfigOptions($params)
 // Admin Services Tab - Displays admin.tpl
 function openstacknova_AdminServicesTabFields($params)
 {
-    $server_info = [];
-    $openstack_error = '';
-    
     try {
         $serverId = openstacknova_getServerId($params['serviceid']);
-        if ($serverId) {
-            $client = openstacknova_createClient($params);
-            $compute = $client->computeV2();
-            $server = $compute->getServer(['id' => $serverId]);
-            
-            // Get server details
-            $server_info = [
-                'id' => $server->id,
-                'name' => $server->name,
-                'status' => $server->status,
-                'created' => $server->created,
-                'addresses' => $server->addresses,
+        if (!$serverId) {
+            return [
+                'OpenStack Server' => 'Not provisioned yet',
             ];
         }
+
+        $client  = openstacknova_createClient($params);
+        $compute = $client->computeV2();
+        $server  = $compute->getServer(['id' => $serverId]);
+
+        // Build STRING output only
+        $addresses = [];
+        if (!empty($server->addresses)) {
+            foreach ($server->addresses as $net => $ips) {
+                foreach ($ips as $ip) {
+                    $addresses[] = "{$net}: {$ip->addr}";
+                }
+            }
+        }
+
+        return [
+            'OpenStack ID'   => $server->id,
+            'Name'           => $server->name,
+            'Status'         => $server->status,
+            'Created'        => $server->created,
+            'IP Addresses'   => implode('<br>', $addresses),
+        ];
     } catch (Exception $e) {
-        $openstack_error = $e->getMessage();
+        return [
+            'OpenStack Error' => $e->getMessage(),
+        ];
     }
-    
-    // Return the template variables
-    return [
-        'Template Variables' => 'OpenStack Info',
-        'server_info' => $server_info,
-        'openstack_error' => $openstack_error,
-        'serviceid' => $params['serviceid'],
-    ];
 }
 
 // Client Area Output - Displays client.tpl
@@ -226,7 +236,8 @@ function openstacknova_CreateAccount($params)
 
         // Build server creation array
         $serverOptions = [
-            'name' => $params['clientsdetails']['firstname'] . '_' . $params['clientsdetails']['lastname'] . '-' . $params['userid'] . '_' . $params['serviceid'],
+            // 'name' => trim($params['clientsdetails']['firstname']) . '_' . trim($params['clientsdetails']['lastname']) . '-' . $params['userid'] . '_' . $params['serviceid'],
+            'name' => 'openstack-iaas-' . $params['userid'] . '-' . $params['serviceid'],
             'imageId' => $imageId, // Image ID from config
             'flavorId' => $flavorId, // Flavor ID from config
         ];
@@ -248,6 +259,9 @@ function openstacknova_CreateAccount($params)
 
         // Store the OpenStack server ID in the WHMCS service custom field
         openstacknova_saveServerId($params['serviceid'], $server->id);
+
+        $domain = $serverOptions['name'] . '.whmcs.test';
+        openstacknova_saveServerDomain($params['serviceid'], $domain);
 
         return 'success';
     } catch (Exception $e) {
@@ -368,6 +382,38 @@ function openstacknova_saveServerId($serviceId, $serverId)
                 'value' => $serverId
             ]);
     }
+}
+
+function openstacknova_saveServerDomain($serviceId, $domainToSave)
+{
+    // This function can be implemented to save the server domain if needed
+    // ---- NEW CODE START: Save the domain to WHMCS ----
+    try {
+        // Update the main service record in tblhosting
+        Capsule::table('tblhosting')
+            ->where('id', $serviceId)
+            ->update(['domain' => $domainToSave]);
+        
+        logModuleCall(
+            'openstacknova',
+            __FUNCTION__ . ' - Domain Updated',
+            ['serviceid' => $serviceId, 'domain' => $domainToSave],
+            '',
+            '',
+            array()
+        );
+    } catch (\Exception $dbError) {
+        // Log the error but don't fail the entire provisioning
+        logModuleCall(
+            'openstacknova',
+            __FUNCTION__ . ' - Domain Update Failed',
+            ['serviceid' => $serviceId, 'domain' => $domainToSave],
+            '',
+            $dbError->getMessage(),
+            array()
+        );
+    }
+    // ---- NEW CODE END ----
 }
 
 // Retrieve stored OpenStack server ID
