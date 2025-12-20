@@ -198,15 +198,7 @@ function openstacknova_ClientArea($params)
 function openstacknova_TestConnection($params)
 {
     try {
-        if ($params['serverhostname']) {
-            $params['serverport'] = $params['serverport'] ?: 5000;
-        } else {
-            throw new Exception('Server Hostname is required for connection test.');
-        }
-        $params['configoption1'] = 'http://' . $params['serverhostname'] . ':' . $params['serverport'] . '/v3';
-        $params['configoption2'] = $params['serverusername'];
-        $params['configoption3'] = $params['serverpassword'];
-        $client = openstacknova_createClient($params);
+        $client = openstacknova_createClientByModuleParams($params);
         $compute = $client->computeV2();
         // List servers to verify access
         $az = $compute->listAvailabilityZones();
@@ -214,6 +206,20 @@ function openstacknova_TestConnection($params)
     } catch (Exception $e) {
         return array('success' => false, 'error' => 'Connection failed: ' . $e->getMessage());
     }
+}
+
+function openstacknova_createClientByModuleParams($moduleParams)
+{
+    $params = $moduleParams;
+    if ($params['serverhostname']) {
+        $params['serverport'] = $params['serverport'] ?: 5000;
+    } else {
+        throw new Exception('Server Hostname is required for connection test.');
+    }
+    $params['configoption1'] = 'http://' . $params['serverhostname'] . ':' . $params['serverport'] . '/v3';
+    $params['configoption2'] = $params['serverusername'];
+    $params['configoption3'] = $params['serverpassword'];
+    return openstacknova_createClient($params);
 }
 
 function openstacknova_CreateAccount($params)
@@ -353,6 +359,14 @@ function openstacknova_createClient($params)
             ],
         ],
     ]);
+}
+
+function openstacknova_getServerDomainByName($serverName) {
+    $result = null;
+    if ($serverName && str_starts_with($serverName, 'openstack-iaas-')) {
+        $result = $serverName . '.whmcs.test';
+    }
+    return $result;
 }
 
 // Store OpenStack server ID in a custom field

@@ -52,52 +52,99 @@ class OpenStackMetricsProvider implements ProviderInterface
     }
     
     public function usage() {
-        // This function is called by cron for ALL services on this server.
+        // Called by cron for ALL services on this server.
         $usageData = [];
         
-        // 1. Get all OpenStack servers
-        $client = openstacknova_createClient($this->moduleParams);
-        $compute = $client->computeV2();
-        $servers = $compute->listServers(true);
-        
-        foreach ($servers as $server) {
-            $serverName = $server->name;
-            if ($serverName && !str_starts_with($serverName, 'openstack-iaas-')) {
-                continue; // Skip servers not created by WHMCS
-            }
-            // 2. Find the WHMCS service ID for this OpenStack server
-            //    This reverses the logic of openstacknova_getServerId
-            $serverId = $server->id;
-            $serviceId = $this->getServiceIdByServerId($serverId);
+        // 1. Get all services for this server from WHMCS database
+        $serverId = $this->moduleParams['serverid']; // The WHMCS server ID
+        $services = Capsule::table('tblhosting')
+            ->where('server', $serverId)
+            ->get();
             
-            if ($serviceId) {
-                // 3. Fetch metrics for this server
+        foreach ($services as $service) {
+            $domain = $service->domain;
+            $serviceId = $service->id;
+            
+            // 2. Get OpenStack server ID for this WHMCS service
+            $openStackServerId = $this->getServerIdByDomain($domain);
+            if (!$openStackServerId) {
+                continue; // No OpenStack server linked to this WHMCS service
+            }
+            
+            // 3. Fetch metrics for this OpenStack server
+            try {
+                $client = openstacknova_createClientByModuleParams($this->moduleParams);
+                $compute = $client->computeV2();
+                $server = $compute->getServer(['id' => $openStackServerId]);
                 $serverMetrics = $this->getMetricsForServer($server, $client);
-                // 4. Key the array by the SERVICE ID (the tenant identifier)
-                $usageData[$serviceId] = $this->wrapUserData($serverMetrics);
+                
+                // 4. Key the array by the DOMAIN (WHMCS tenant identifier)
+                $usageData[$domain] = $this->wrapUserData($serverMetrics);
+            } catch (\Exception $e) {
+                logModuleCall('openstacknova', 'usage', "Domain: $domain", $e->getMessage(), [], []);
+                continue;
             }
         }
         return $usageData;
     }
     
     public function tenantUsage($tenant) {
-        logModuleCall('openstacknova', 'tenantUsage', $tenant, 'Fetching usage for tenant', [], []);
-        // $tenant is the WHMCS service ID
-        $serverId = openstacknova_getServerId($tenant);
-        logModuleCall('openstacknova', 'tenantUsage', $tenant, 'Resolved server ID', $serverId, []);
-        if (!$serverId) return [];
-
-        $client = openstacknova_createClient($this->moduleParams);
+        // $tenant is the WHMCS service DOMAIN
+        logModuleCall('openstacknova', __FUNCTION__, "Tenant/Domain: $tenant", '', '', []);
+        
+        // 1. Get OpenStack server ID for this domain
+        $openStackServerId = $this->getServerIdByDomain($tenant);
+        logModuleCall('openstacknova', __FUNCTION__, "OpenStack Server ID: $openStackServerId", '', '', []);
+        
+        if (!$openStackServerId) {
+            logModuleCall('openstacknova', __FUNCTION__, "No OpenStack server found for domain: $tenant", '', '', []);
+            return [];
+        }
+        
+        // 2. Fetch the server and its metrics
+        $client = openstacknova_createClientByModuleParams($this->moduleParams);
         $compute = $client->computeV2();
+        
         try {
-            $server = $compute->getServer(['id' => $serverId]);
-            // Pass the main $client, not $compute, to getMetricsForServer
+            $server = $compute->getServer(['id' => $openStackServerId]);
             $serverMetrics = $this->getMetricsForServer($server, $client);
+            logModuleCall('openstacknova', __FUNCTION__, "Metrics fetched: " . json_encode($serverMetrics), '', '', []);
+            
             return $this->wrapUserData($serverMetrics);
         } catch (\Exception $e) {
             logModuleCall('openstacknova', 'tenantUsage', $tenant, $e->getMessage(), [], []);
             return [];
         }
+    }
+    
+    /**
+     * NEW FUNCTION: Get OpenStack Server ID by WHMCS service domain
+     * This is the critical lookup function for the Refresh Now button.
+     */
+    private function getServerIdByDomain($domain) {
+        // 1. Find the WHMCS service ID for this domain on the current server
+        $serverId = $this->moduleParams['serverid'];
+        $service = Capsule::table('tblhosting')
+            ->where('domain', $domain)
+            ->where('server', $serverId)
+            ->first();
+            
+        if (!$service) {
+            return null; // No service found with this domain on this server
+        }
+        
+        // 2. Now find the OpenStack Server ID custom field for this service
+        $fieldId = $this->getCustomFieldId();
+        if (!$fieldId) {
+            return null;
+        }
+        
+        $customField = Capsule::table('tblcustomfieldsvalues')
+            ->where('fieldid', $fieldId)
+            ->where('relid', $service->id) // relid is the WHMCS service ID
+            ->first();
+            
+        return $customField ? $customField->value : null;
     }
     
     private function wrapUserData($data) {
@@ -111,24 +158,7 @@ class OpenStackMetricsProvider implements ProviderInterface
         }
         return $wrapped;
     }
-    
-    /**
-     * Find the WHMCS service ID by OpenStack server ID
-     * Uses the same custom field logic as openstacknova_getServerId, but in reverse.
-     */
-    private function getServiceIdByServerId($serverId) {
-        $fieldId = $this->getCustomFieldId();
-        if (!$fieldId) {
-            return null;
-        }
-        
-        $result = Capsule::table('tblcustomfieldsvalues')
-            ->where('fieldid', $fieldId)
-            ->where('value', $serverId)
-            ->first();
-            
-        return $result ? $result->relid : null; // 'relid' is the service ID
-    }
+
     
     /**
      * Fetch metrics for a specific OpenStack server object.
@@ -138,8 +168,10 @@ class OpenStackMetricsProvider implements ProviderInterface
         $serverId = $server->id;
         $computeService = $client->computeV2();
 
+        logModuleCall('openstacknova - Get Metrics Called', __FUNCTION__, 'serverId=' . $serverId, '', '', []);
         try {
-            $aggregateData = $this->makeAggregatesRequest($client, $this->moduleParams, $serverId);
+            $aggregateData = $this->makeAggregatesRequest($client, $serverId);
+            logModuleCall('openstacknova - Aggregate Data', __FUNCTION__, $aggregateData, '', '', []);
             if (
                 isset($aggregateData[0]) &&
                 isset($aggregateData[0]['measures']) &&
@@ -179,25 +211,10 @@ class OpenStackMetricsProvider implements ProviderInterface
      * Helper: Makes an authenticated POST request to the Ceilometer/Gnocchi aggregates API.
      */
     private function makeAggregatesRequest($client, $serverId) {
-        // 1. Get an authentication token and find the Telemetry (Ceilometer) endpoint
-        $token = $client->getToken(); // From your identity service
-        $catalog = $token->catalog; // Service catalog from the token
-
-        // Find the Telemetry service endpoint (type: 'metering' or 'metric')
-        $telemetryUrl = null;
-        foreach ($catalog as $service) {
-            if ($service['type'] == 'metering' || $service['type'] == 'metric') {
-                foreach ($service['endpoints'] as $endpoint) {
-                    if ($endpoint['region'] == $this->moduleParams['configoption5'] ?? 'RegionOne') {
-                        $telemetryUrl = $endpoint['url'];
-                        break 2;
-                    }
-                }
-            }
-        }
-        if (!$telemetryUrl) {
-            throw new \Exception('Telemetry service endpoint not found in catalog.');
-        }
+        logModuleCall('openstacknova - Get AggregatedData Called', __FUNCTION__, 'serverId=' . $serverId, '', '', []);
+        
+        // Generate the authentication token
+        $token = 'gAAAAABpQP23vyMRewXqsFdKkY-d6Bxa457_QbpR0-wg07OWCKwFqNIXqxwlb_8vWYvEPr2u-oEHUHyEP_brvk3ZCjmHBNmiKzfwqEfA8AgobbpDDgeiEo84VwyklXffT-A6SpTBw2Glcss5p5mm9myrhMRz_9YjaK1V9VhJpPa0y_bP8GwVxQA'; // Placeholder for token
 
         // 2. Calculate time range (e.g., last 1 hour)
         $endTime = new \DateTime('now', new \DateTimeZone('UTC'));
@@ -209,7 +226,7 @@ class OpenStackMetricsProvider implements ProviderInterface
         $endStr = $endTime->format('Y-m-d\TH:i:s');
 
         // 3. Build the API request URL and payload[citation:1]
-        $url = $telemetryUrl . '/v1/aggregates';
+        $url = 'http://172.16.76.230:8041/v1/aggregates';
         $url .= '?groupby=original_resource_id';
         $url .= '&granularity=300.0'; // 5 minutes in seconds[citation:1]
         $url .= '&start=' . urlencode($startStr);
@@ -221,13 +238,14 @@ class OpenStackMetricsProvider implements ProviderInterface
             'search' => "id = '" . $serverId . "'" // Query to filter by instance ID[citation:1]
         ];
 
+        logModuleCall('openstacknova - CURL Request', __FUNCTION__, $url . ' PAYLOAD ' . json_encode($postData), '', '', []);
         // 4. Execute the HTTP POST request
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
             CURLOPT_HTTPHEADER => [
-                'X-Auth-Token: ' . $token->id,
+                'X-Auth-Token: ' . $token,
                 'Content-Type: application/json'
             ],
             CURLOPT_POSTFIELDS => json_encode($postData)
@@ -244,6 +262,8 @@ class OpenStackMetricsProvider implements ProviderInterface
         if ($httpCode >= 400) {
             throw new \Exception("API request failed ($httpCode): " . $response);
         }
+
+        logModuleCall('openstacknova - CURL Response', __FUNCTION__, $response, '', '', []);
 
         return json_decode($response, true);
     }
