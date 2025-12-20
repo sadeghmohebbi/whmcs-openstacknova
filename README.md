@@ -29,5 +29,5 @@ Then, to install custom cronjob. you should modify local user crontab as below:
 */5 * * * * /usr/bin/php /var/www/whmcs/crons/cron.php > /var/log/whmcs-cron
 
 # run every hours
-0 * * * * /usr/bin/php /var/www/whmcs/cron_billing_usage_automation.php > /var/log/whmcs-cron
+0 * * * * /usr/bin/php /var/www/whmcs/cron_billing_usage_automation.`php > /var/log/whmcs-cron
 ```
