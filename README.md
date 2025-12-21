@@ -12,7 +12,6 @@ WHMCS server module to integrate openstack nova IaaS image instance full lifecyc
 ## How to install
 
 First, Copy modules/servers/openstacknova to WHMCS:/var/www/whmcs/modules/servers/
-
 ```bash
 cp -r modules/servers/openstacknova /var/www/whmcs/modules/servers/
 ```
@@ -27,7 +26,6 @@ Then, to install custom cronjob. you should modify local user crontab as below:
 ```bash
 # run every 15 minutes
 */5 * * * * /usr/bin/php /var/www/whmcs/crons/cron.php > /var/log/whmcs-cron
-
 # run every hours
-0 * * * * /usr/bin/php /var/www/whmcs/cron_billing_usage_automation.`php > /var/log/whmcs-cron
+0 * * * * /usr/bin/php /var/www/whmcs/cron_billing_usage_automation.php > /var/log/whmcs-cron
 ```
