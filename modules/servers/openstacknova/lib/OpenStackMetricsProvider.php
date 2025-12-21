@@ -214,7 +214,7 @@ class OpenStackMetricsProvider implements ProviderInterface
         logModuleCall('openstacknova - Get AggregatedData Called', __FUNCTION__, 'serverId=' . $serverId, '', '', []);
         
         // Generate the authentication token
-        $token = 'gAAAAABpQP23vyMRewXqsFdKkY-d6Bxa457_QbpR0-wg07OWCKwFqNIXqxwlb_8vWYvEPr2u-oEHUHyEP_brvk3ZCjmHBNmiKzfwqEfA8AgobbpDDgeiEo84VwyklXffT-A6SpTBw2Glcss5p5mm9myrhMRz_9YjaK1V9VhJpPa0y_bP8GwVxQA'; // Placeholder for token
+        $token = 'TOKEN'; // Placeholder for token
 
         // 2. Calculate time range (e.g., last 1 hour)
         $endTime = new \DateTime('now', new \DateTimeZone('UTC'));
