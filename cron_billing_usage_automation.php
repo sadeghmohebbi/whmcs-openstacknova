@@ -15,7 +15,6 @@ $postData = array(
 );
 $adminUsername = 'sadeghmohebbi'; // Your admin username
 $hourlyRatePerGB = 0.10; // $0.10 per GB it should load from product config
-$totalCharge = 0;
 
 $results = localAPI($command, $postData, $adminUsername);
 
@@ -35,6 +34,7 @@ foreach ($results['products']['product'] as $product) {
     $pid = $product['pid'];
     $domain = $product['domain'];
     $clientId = $product['clientid'];
+    $totalCharge = 0;
 
     echo "Service ID: {$serviceId}\n";
     echo "Product ID: {$pid}\n";
